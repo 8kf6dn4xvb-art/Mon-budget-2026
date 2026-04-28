@@ -131,6 +131,8 @@ tbody td{padding:10px 14px;font-size:13px;vertical-align:middle}
 .form-group{display:flex;flex-direction:column;gap:4px}
 .form-label{font-size:10px;color:var(--dim);letter-spacing:.04em;text-transform:uppercase}
 input,select{background:var(--surface2);border:1px solid var(--border2);color:var(--text);padding:7px 10px;border-radius:var(--rs);font-family:'DM Sans',sans-serif;font-size:12px;outline:none;width:100%;transition:border-color .15s}
+input[type="date"]{cursor:pointer;color-scheme:dark}
+input[type="date"]::-webkit-calendar-picker-indicator{filter:invert(0.7);cursor:pointer;margin-right:-2px}
 input:focus,select:focus{border-color:var(--postale)}
 select option{background:var(--surface2)}
 .btn-add{background:var(--postale);border:none;color:#fff;padding:8px 16px;border-radius:var(--rs);font-family:'DM Sans',sans-serif;font-size:12px;font-weight:500;cursor:pointer;transition:opacity .15s;white-space:nowrap}
@@ -313,6 +315,9 @@ function sanitizeData(d) {
     if (!d.revenus_tx[m]) d.revenus_tx[m] = [];
   });
   if (!d.config) d.config = {};
+  if (!d.recurrents) d.recurrents = { revenus: [], depenses: [] };
+  if (!d.recurrents.revenus)  d.recurrents.revenus  = [];
+  if (!d.recurrents.depenses) d.recurrents.depenses = [];
   return d;
 }
 
@@ -378,15 +383,29 @@ function ecartClass(n) {
 }
 
 // ── CALCULS ───────────────────────────────────────────────────────────────────
+// Get recurring items merged into a month (prévu from template, réel = 0 until filled)
+function getRecurrantsForMonth(moisName, type) {
+  const items = (data.recurrents && data.recurrents[type]) || [];
+  return items.map((r,i) => ({
+    ...r,
+    _recId: i,
+    _isRecurrent: true,
+  }));
+}
+
 function getRevTotal(moisIdx) {
   if (moisIdx !== undefined) {
-    // Sum from revenue transactions for this month
     const mois = MOIS[moisIdx];
     const txRev = (data.revenus_tx && data.revenus_tx[mois]) || [];
-    const fromTx = txRev.reduce((a,t)=>a+(+t.montant||0),0);
-    // Also add fixed revenues if any
-    const fixed = Object.values(data.revenus).reduce((a,b)=>a+(+b||0),0);
-    return fromTx + fixed;
+    // Recurring revenues: use réel if filled, else prévu
+    const recRev = getRecurrantsForMonth(mois,'revenus');
+    const fromRec = recRev.reduce((a,r) => {
+      const override = txRev.find(t => t._recId === r._recId);
+      return a + (override ? (+override.montant||0) : (+r.montant||0));
+    }, 0);
+    // Manual (non-recurring) revenues
+    const manual = txRev.filter(t => !t._isRecurrent).reduce((a,t)=>a+(+t.montant||0),0);
+    return fromRec + manual;
   }
   return Object.values(data.revenus).reduce((a,b)=>a+(+b||0),0);
 }
@@ -523,7 +542,28 @@ function renderMonth(moisName) {
   const depPrev = COMPTES.reduce((a,c)=>a+getDepensesPrev(moisIdx,c),0);
 
   // Transactions table
-  const txRows = txs.map((t,i) => {
+  // Recurring depenses pre-filled
+  const recDeps = data.recurrents?.depenses||[];
+  const recDepRows = recDeps.map((r,idx)=>{
+    const override = txs.find(t=>t._recId===idx&&t._isRecurrent);
+    const reelVal = override ? override.reel : '';
+    const grpObj = GROUPES.find(g=>g.code===r.groupe);
+    return `<tr style="background:rgba(248,113,113,0.04)">
+      <td class="td-date">${r.date||''}<span style="font-size:9px;margin-left:4px;color:var(--neg);opacity:.7">↺</span></td>
+      <td class="td-label">${r.libelle}</td>
+      <td><span class="badge ${COMPTE_CLS[r.compte]||''}">${r.compte||''}</span></td>
+      <td><span class="badge ${grpObj?grpObj.cls:''}">${grpObj?grpObj.label:r.groupe||''}</span></td>
+      <td style="color:var(--muted);font-size:12px">${r.categorie||''}</td>
+      <td class="td-num val-muted">${fmt(r.montant)}</td>
+      <td style="padding:4px 8px"><input type="number" placeholder="Réel" value="${reelVal}"
+        style="width:90px;background:var(--surface2);border:1px solid var(--border2);color:var(--neg);padding:4px 8px;border-radius:6px;font-size:12px;text-align:right"
+        onchange="updateRecurrentReal('${moisName}','depenses',${idx},this.value)"></td>
+      <td class="${ecartClass(reelVal?r.montant-reelVal:null)}">${reelVal?fmtSign(r.montant-reelVal):'—'}</td>
+      <td></td>
+    </tr>`;
+  }).join('');
+
+  const txRows = txs.filter(t=>!t._isRecurrent).map((t,i) => {
     const grpObj = GROUPES.find(g=>g.code===t.groupe);
     const ecart = (t.prevu && t.reel) ? t.prevu - t.reel : null;
     return `
@@ -604,27 +644,49 @@ function renderMonth(moisName) {
       </div>
       <table>
         <thead><tr>
-          <th>Date</th><th>Libellé</th><th>Compte</th><th>Catégorie</th><th style="text-align:right">Montant</th><th></th>
+          <th>Date</th><th>Libellé</th><th>Compte</th><th>Catégorie</th><th style="text-align:right">Prévu</th><th style="text-align:right">Réel</th><th></th>
         </tr></thead>
         <tbody>
-          ${(data.revenus_tx[moisName]||[]).map((t,i)=>`
-            <tr>
-              <td class="td-date">${t.date||''}</td>
-              <td>${t.libelle||''}</td>
-              <td><span class="badge ${COMPTE_CLS[t.compte]||''}">${t.compte||''}</span></td>
-              <td style="color:var(--muted);font-size:12px">${t.categorie||''}</td>
-              <td class="td-num val-pos">${fmt(t.montant)}</td>
-              <td><button class="btn-del" onclick="delRevTx('${moisName}',${i})">✕</button></td>
-            </tr>`).join('')||'<tr><td colspan="5" style="text-align:center;color:var(--dim);padding:16px;font-size:12px">Aucun revenu ce mois</td></tr>'}
+          ${(()=>{
+            const recs = data.recurrents?.revenus||[];
+            const manuals = (data.revenus_tx[moisName]||[]).filter(t=>!t._isRecurrent);
+            const recRows = recs.map((r,i)=>{
+              const override = (data.revenus_tx[moisName]||[]).find(t=>t._recId===i&&t._isRecurrent);
+              const realVal = override ? override.montant : '';
+              return `<tr style="background:rgba(52,211,153,0.04)">
+                <td class="td-date">${r.date||''}<span style="font-size:9px;margin-left:4px;color:var(--pos);opacity:.7">↺</span></td>
+                <td>${r.libelle}</td>
+                <td><span class="badge ${COMPTE_CLS[r.compte]||''}">${r.compte||''}</span></td>
+                <td style="color:var(--muted);font-size:12px">${r.categorie||''}</td>
+                <td class="td-num val-muted">${fmt(r.montant)}</td>
+                <td style="padding:4px 8px"><input type="number" placeholder="Réel" value="${realVal}"
+                  style="width:90px;background:var(--surface2);border:1px solid var(--border2);color:var(--pos);padding:4px 8px;border-radius:6px;font-size:12px;text-align:right"
+                  onchange="updateRecurrentReal('${moisName}','revenus',${i},this.value)"></td>
+                <td></td>
+              </tr>`;
+            }).join('');
+            const manualRows = manuals.map((t,i)=>`
+              <tr>
+                <td class="td-date">${t.date||''}</td>
+                <td>${t.libelle||''}</td>
+                <td><span class="badge ${COMPTE_CLS[t.compte]||''}">${t.compte||''}</span></td>
+                <td style="color:var(--muted);font-size:12px">${t.categorie||''}</td>
+                <td class="td-num val-pos">${fmt(t.montant)}</td>
+                <td></td>
+                <td><button class="btn-del" onclick="delRevTx('${moisName}',${i})">✕</button></td>
+              </tr>`).join('');
+            return recRows + manualRows || '<tr><td colspan="7" style="text-align:center;color:var(--dim);padding:16px;font-size:12px">Aucun revenu ce mois — ajoutez des revenus fixes dans Paramètres</td></tr>';
+          })()}
           ${(data.revenus_tx[moisName]||[]).length ? `<tr class="total-row">
             <td colspan="4" style="text-align:right;color:var(--muted);font-size:12px">TOTAL</td>
-            <td class="td-num val-pos">${fmt((data.revenus_tx[moisName]||[]).reduce((a,t)=>a+(+t.montant||0),0))}</td>
+            <td class="td-num val-muted">${fmt((data.recurrents?.revenus||[]).reduce((a,r)=>a+(+r.montant||0),0))}</td>
+            <td class="td-num val-pos">${fmt(getRevTotal(moisIdx))}</td>
             <td></td>
           </tr>` : ''}
         </tbody>
       </table>
       <div style="padding:14px 18px;border-top:1px solid var(--border);display:grid;grid-template-columns:90px 1fr 150px 150px 110px auto;gap:8px;align-items:end">
-        <div class="form-group"><label class="form-label">Date</label><input type="text" id="rv-date" placeholder="01/05"></div>
+        <div class="form-group"><label class="form-label">Date</label><input type="date" id="rv-date"></div>
         <div class="form-group"><label class="form-label">Libellé</label><input type="text" id="rv-libelle" placeholder="Ex : Salaire Yann"></div>
         <div class="form-group"><label class="form-label">Compte</label><select id="rv-compte">${compteOptions}</select></div>
         <div class="form-group"><label class="form-label">Catégorie</label><select id="rv-categorie">${getGroupes().map(g=>`<option value="${g.label}">${g.label}</option>`).join('')}</select></div>
@@ -636,7 +698,7 @@ function renderMonth(moisName) {
     <div class="sec-label">Dépenses du mois</div>
     <div class="add-section">
       <div class="add-form" id="addForm-${moisName}">
-        <div class="form-group"><label class="form-label">Date</label><input type="text" id="f-date" placeholder="01/05"></div>
+        <div class="form-group"><label class="form-label">Date</label><input type="date" id="f-date"></div>
         <div class="form-group"><label class="form-label">Libellé</label><input type="text" id="f-libelle" placeholder="Ex : Loyer"></div>
         <div class="form-group"><label class="form-label">Compte</label><select id="f-compte">${compteOptions}</select></div>
         <div class="form-group"><label class="form-label">Groupe</label><select id="f-groupe" onchange="updateCats()">${grpOptions}</select></div>
@@ -660,8 +722,9 @@ function renderMonth(moisName) {
           <th style="text-align:right">Écart</th><th></th>
         </tr></thead>
         <tbody>
-          ${txRows || '<tr><td colspan="9" style="text-align:center;color:var(--dim);padding:24px;font-size:12px">Aucune opération ce mois — utilisez le formulaire ci-dessus</td></tr>'}
-          ${txs.length ? `<tr class="total-row">
+          ${recDepRows}
+          ${txRows || (!recDeps.length ? '<tr><td colspan="9" style="text-align:center;color:var(--dim);padding:24px;font-size:12px">Aucune opération ce mois — utilisez le formulaire ci-dessus</td></tr>' : '')}
+          ${(txs.length || recDeps.length) ? `<tr class="total-row">
             <td colspan="5" style="text-align:right;color:var(--muted);font-size:12px">TOTAL</td>
             <td class="td-num">${fmt(totalPrevu)}</td>
             <td class="td-num">${fmt(totalReel)}</td>
@@ -777,7 +840,8 @@ function updateCats() {
 }
 
 function addTx(moisName) {
-  const date = document.getElementById('f-date').value;
+  const rawDate = document.getElementById('f-date').value;
+  const date = rawDate ? new Date(rawDate).toLocaleDateString('fr-FR',{day:'2-digit',month:'2-digit'}) : '';
   const libelle = document.getElementById('f-libelle').value;
   const compte = document.getElementById('f-compte').value;
   const groupe = document.getElementById('f-groupe').value;
@@ -824,6 +888,51 @@ function addRevTx(moisName) {
 function delRevTx(moisName, idx) {
   data.revenus_tx[moisName].splice(idx, 1);
   save(); showPage(moisName);
+}
+
+// ── RÉCURRENTS ────────────────────────────────────────────────────────────────
+function addRecurrent(type) {
+  const prefix = type === 'revenus' ? 'rr' : 'rd';
+  const rawDate  = document.getElementById(prefix+'-date').value;
+  const date     = rawDate ? new Date(rawDate).toLocaleDateString('fr-FR',{day:'2-digit',month:'2-digit'}) : '';
+  const libelle  = document.getElementById(prefix+'-libelle').value.trim();
+  const compte   = document.getElementById(prefix+'-compte').value;
+  const groupe   = type === 'depenses' ? document.getElementById(prefix+'-groupe').value : '';
+  const categorie= type === 'depenses'
+    ? document.getElementById(prefix+'-categorie').value
+    : document.getElementById(prefix+'-categorie').value;
+  const montant  = parseFloat(document.getElementById(prefix+'-montant').value) || 0;
+  if (!libelle || !montant) { alert('Libellé et montant obligatoires'); return; }
+  data.recurrents[type].push({date, libelle, compte, groupe, categorie, montant});
+  save();
+  showPage('settings');
+}
+
+function delRecurrent(type, idx) {
+  data.recurrents[type].splice(idx, 1);
+  save();
+  showPage('settings');
+}
+
+function updateRecurrentReal(moisName, type, recId, val) {
+  // Store override for this month
+  const key = type === 'revenus' ? 'revenus_tx' : 'transactions';
+  if (!data[key]) data[key] = {};
+  if (!data[key][moisName]) data[key][moisName] = [];
+  const existing = data[key][moisName].find(t => t._recId === recId);
+  if (existing) {
+    if (type === 'revenus') existing.montant = parseFloat(val)||0;
+    else existing.reel = parseFloat(val)||0;
+  } else {
+    const rec = data.recurrents[type][recId];
+    if (type === 'revenus') {
+      data[key][moisName].push({...rec, _recId: recId, _isRecurrent: true, montant: parseFloat(val)||0});
+    } else {
+      data[key][moisName].push({...rec, _recId: recId, _isRecurrent: true, prevu: rec.montant, reel: parseFloat(val)||0});
+    }
+  }
+  save();
+  renderMain();
 }
 
 // ── SETTINGS PAGE ─────────────────────────────────────────────────────────────
@@ -932,6 +1041,75 @@ function renderSettings() {
       <input type="number" value="${data.soldes_debut.jan[k]||0}" onchange="updateSolde('${k}',this.value)">
     </div>`).join('');
 
+  // Recurring items tables
+  const compteOpts = COMPTES.map(c=>`<option value="${c}">${c}</option>`).join('');
+  const grpOpts = grps.map(g=>`<option value="${g.code}">${g.label}</option>`).join('');
+
+  function recRow(r, i, type) {
+    return `<tr style="border-bottom:1px solid var(--border)">
+      <td style="padding:8px 12px;font-size:12px;color:var(--muted)">${r.date||'—'}</td>
+      <td style="padding:8px 12px;font-size:13px">${r.libelle}</td>
+      <td style="padding:8px 12px"><span class="badge ${COMPTE_CLS[r.compte]||''}">${r.compte||''}</span></td>
+      <td style="padding:8px 12px;font-size:12px;color:var(--muted)">${r.categorie||''}</td>
+      <td style="padding:8px 12px;font-family:'DM Mono',monospace;font-size:12px;text-align:right;color:${type==='revenus'?'var(--pos)':'var(--neg)'}">${fmt(r.montant)}</td>
+      <td style="padding:8px 12px"><button class="btn-del" onclick="delRecurrent('${type}',${i})">✕</button></td>
+    </tr>`;
+  }
+
+  const recRevRows = (data.recurrents.revenus||[]).map((r,i)=>recRow(r,i,'revenus')).join('') ||
+    '<tr><td colspan="6" style="padding:16px;text-align:center;color:var(--dim);font-size:12px">Aucun revenu fixe</td></tr>';
+  const recDepRows = (data.recurrents.depenses||[]).map((r,i)=>recRow(r,i,'depenses')).join('') ||
+    '<tr><td colspan="6" style="padding:16px;text-align:center;color:var(--dim);font-size:12px">Aucune dépense fixe</td></tr>';
+
+  const recSection = `
+    <div class="sec-label">Revenus & dépenses fixes — modèle mensuel</div>
+    <div class="tcard" style="margin-bottom:12px">
+      <div class="tcard-header"><span class="tcard-title" style="color:var(--pos)">💰 Revenus fixes</span></div>
+      <table style="width:100%;border-collapse:collapse">
+        <thead><tr style="background:var(--surface2)">
+          <th style="padding:8px 12px;font-size:10px;color:var(--dim);text-align:left">JOUR</th>
+          <th style="padding:8px 12px;font-size:10px;color:var(--dim);text-align:left">LIBELLÉ</th>
+          <th style="padding:8px 12px;font-size:10px;color:var(--dim);text-align:left">COMPTE</th>
+          <th style="padding:8px 12px;font-size:10px;color:var(--dim);text-align:left">CATÉGORIE</th>
+          <th style="padding:8px 12px;font-size:10px;color:var(--dim);text-align:right">MONTANT</th>
+          <th></th>
+        </tr></thead>
+        <tbody>${recRevRows}</tbody>
+      </table>
+      <div style="padding:12px 16px;border-top:1px solid var(--border);display:grid;grid-template-columns:70px 1fr 150px 150px 110px auto;gap:8px;align-items:end">
+        <div class="form-group"><label class="form-label">Date</label><input type="date" id="rr-date"></div>
+        <div class="form-group"><label class="form-label">Libellé</label><input type="text" id="rr-libelle" placeholder="Salaire Yann"></div>
+        <div class="form-group"><label class="form-label">Compte</label><select id="rr-compte">${compteOpts}</select></div>
+        <div class="form-group"><label class="form-label">Catégorie</label><input type="text" id="rr-categorie" placeholder="Ex : Salaire"></div>
+        <div class="form-group"><label class="form-label">Montant (€)</label><input type="number" id="rr-montant" placeholder="0"></div>
+        <button class="btn-add" style="background:var(--pos)" onclick="addRecurrent('revenus')">+ Ajouter</button>
+      </div>
+    </div>
+
+    <div class="tcard" style="margin-bottom:20px">
+      <div class="tcard-header"><span class="tcard-title" style="color:var(--neg)">💸 Dépenses fixes</span></div>
+      <table style="width:100%;border-collapse:collapse">
+        <thead><tr style="background:var(--surface2)">
+          <th style="padding:8px 12px;font-size:10px;color:var(--dim);text-align:left">JOUR</th>
+          <th style="padding:8px 12px;font-size:10px;color:var(--dim);text-align:left">LIBELLÉ</th>
+          <th style="padding:8px 12px;font-size:10px;color:var(--dim);text-align:left">COMPTE</th>
+          <th style="padding:8px 12px;font-size:10px;color:var(--dim);text-align:left">CATÉGORIE</th>
+          <th style="padding:8px 12px;font-size:10px;color:var(--dim);text-align:right">MONTANT</th>
+          <th></th>
+        </tr></thead>
+        <tbody>${recDepRows}</tbody>
+      </table>
+      <div style="padding:12px 16px;border-top:1px solid var(--border);display:grid;grid-template-columns:70px 1fr 140px 140px 140px 110px auto;gap:8px;align-items:end">
+        <div class="form-group"><label class="form-label">Date</label><input type="date" id="rd-date"></div>
+        <div class="form-group"><label class="form-label">Libellé</label><input type="text" id="rd-libelle" placeholder="Loyer"></div>
+        <div class="form-group"><label class="form-label">Compte</label><select id="rd-compte">${compteOpts}</select></div>
+        <div class="form-group"><label class="form-label">Groupe</label><select id="rd-groupe" onchange="document.getElementById('rd-categorie').innerHTML=getCats()[this.value]?.map(c=>'<option>'+c+'</option>').join('')||''">${grpOpts}</select></div>
+        <div class="form-group"><label class="form-label">Catégorie</label><select id="rd-categorie">${(getCats()[grps[0]?.code]||[]).map(c=>`<option>${c}</option>`).join('')}</select></div>
+        <div class="form-group"><label class="form-label">Montant (€)</label><input type="number" id="rd-montant" placeholder="0"></div>
+        <button class="btn-add" onclick="addRecurrent('depenses')">+ Ajouter</button>
+      </div>
+    </div>`;
+
   const grpCards = grps.map(g => {
     const gcats = cats[g.code] || [];
     const catPills = gcats.map((cat,i) => `
@@ -961,7 +1139,7 @@ function renderSettings() {
       </div>`;
   }).join('');
 
-  return `
+  return recSection + `
     <div class="sec-label">Revenus fixes mensuels</div>
     <div class="tcard" style="padding:20px;margin-bottom:20px">
       <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:14px">${revInputs}</div>
@@ -1030,7 +1208,15 @@ function renderMain() {
     main.innerHTML = renderSettings();
   } else {
     main.innerHTML = renderMonth(currentPage);
-    setTimeout(updateCats, 50);
+    setTimeout(() => {
+      updateCats();
+      // Pre-fill date fields with today
+      const today = new Date().toISOString().split('T')[0];
+      ['f-date','rv-date'].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.value = today;
+      });
+    }, 50);
   }
 }
 
